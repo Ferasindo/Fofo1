@@ -1,6 +1,6 @@
 // ==========================================================
 // GPS TRACKING FOR QGIS2WEB
-// Version 3 - OFFLINE FIRST
+// Version 4 - OFFLINE FIRST + SCREEN WAKE LOCK
 // GPS + IndexedDB + GeoJSON + CSV + ZIP
 // ==========================================================
 
@@ -12,10 +12,10 @@
     // SETTINGS
     // ======================================================
 
-    // CURRENT TEST INTERVAL = 10 seconds
+    // TEST MODE: one point every 10 seconds
     var TRACK_INTERVAL = 10 * 1000;
 
-    // FOR FINAL FIELD USE, change to:
+    // FINAL FIELD MODE:
     // var TRACK_INTERVAL = 5 * 60 * 1000;
 
     var DB_NAME = "QGIS2WebGPSTracks";
@@ -44,6 +44,14 @@
 
         statusPanel: null,
 
+        wakeLock: null,
+
+        wakeLockSupported:
+            "wakeLock" in navigator,
+
+        wakeLockStatus:
+            "Not active",
+
         trackId: null,
 
         startTime: null,
@@ -54,11 +62,14 @@
 
         totalDistance: 0,
 
-        lastSavePromise: Promise.resolve(),
+        lastSavePromise:
+            Promise.resolve(),
 
-        lastGPSStatus: "Waiting",
+        lastGPSStatus:
+            "Waiting",
 
-        lastGPSMessage: ""
+        lastGPSMessage:
+            ""
 
     };
 
@@ -161,11 +172,6 @@
 
             return Promise.resolve();
         }
-
-        /*
-         * Queue saves so two IndexedDB writes
-         * cannot overwrite each other.
-         */
 
         gpsTracking.lastSavePromise =
             gpsTracking.lastSavePromise.then(
@@ -401,34 +407,19 @@
         position
     ) {
 
-        var latitude =
-            position.coords.latitude;
-
-        var longitude =
-            position.coords.longitude;
-
-        var accuracy =
-            position.coords.accuracy;
-
-        var timestamp =
-            new Date(
-                position.timestamp ||
-                Date.now()
-            ).toISOString();
-
         return {
 
             id:
                 gpsTracking.points.length + 1,
 
             latitude:
-                latitude,
+                position.coords.latitude,
 
             longitude:
-                longitude,
+                position.coords.longitude,
 
             accuracy:
-                accuracy,
+                position.coords.accuracy,
 
             altitude:
                 position.coords.altitude,
@@ -443,7 +434,10 @@
                 position.coords.heading,
 
             timestamp:
-                timestamp
+                new Date(
+                    position.timestamp ||
+                    Date.now()
+                ).toISOString()
         };
     }
 
@@ -451,9 +445,7 @@
     // ADD POINT TO MAP
     // ======================================================
 
-    function addPointToMap(
-        point
-    ) {
+    function addPointToMap(point) {
 
         var marker =
             L.circleMarker(
@@ -491,8 +483,10 @@
             "<br>" +
 
             "Accuracy: " +
+
             (
-                point.accuracy !== null
+                point.accuracy !== null &&
+                point.accuracy !== undefined
                     ? point.accuracy.toFixed(1)
                     : "N/A"
             ) +
@@ -534,6 +528,175 @@
     }
 
     // ======================================================
+    // SCREEN WAKE LOCK
+    // ======================================================
+
+    async function requestWakeLock() {
+
+        if (!gpsTracking.active) {
+
+            return;
+        }
+
+        if (!("wakeLock" in navigator)) {
+
+            gpsTracking.wakeLockStatus =
+                "Not supported";
+
+            updateTrackingStatus();
+
+            return;
+        }
+
+        if (
+            gpsTracking.wakeLock &&
+            !gpsTracking.wakeLock.released
+        ) {
+
+            gpsTracking.wakeLockStatus =
+                "Screen awake";
+
+            updateTrackingStatus();
+
+            return;
+        }
+
+        try {
+
+            gpsTracking.wakeLock =
+                await navigator.wakeLock.request(
+                    "screen"
+                );
+
+            gpsTracking.wakeLockStatus =
+                "Screen awake";
+
+            gpsTracking.wakeLock.addEventListener(
+                "release",
+                function () {
+
+                    gpsTracking.wakeLock =
+                        null;
+
+                    if (
+                        gpsTracking.active
+                    ) {
+
+                        gpsTracking.wakeLockStatus =
+                            "Released - retrying";
+
+                        updateTrackingStatus();
+
+                        /*
+                         * Try again shortly if the page
+                         * is still visible.
+                         */
+                        setTimeout(
+                            function () {
+
+                                if (
+                                    gpsTracking.active &&
+                                    document.visibilityState ===
+                                    "visible"
+                                ) {
+
+                                    requestWakeLock();
+                                }
+
+                            },
+                            500
+                        );
+
+                    }
+                    else {
+
+                        gpsTracking.wakeLockStatus =
+                            "Released";
+
+                        updateTrackingStatus();
+                    }
+                }
+            );
+
+            updateTrackingStatus();
+
+            console.log(
+                "Screen Wake Lock acquired."
+            );
+
+        }
+        catch (error) {
+
+            gpsTracking.wakeLock =
+                null;
+
+            gpsTracking.wakeLockStatus =
+                "Unavailable";
+
+            updateTrackingStatus();
+
+            console.warn(
+                "Wake Lock could not be acquired:",
+                error
+            );
+        }
+    }
+
+    // ======================================================
+    // RELEASE WAKE LOCK
+    // ======================================================
+
+    async function releaseWakeLock() {
+
+        if (
+            gpsTracking.wakeLock
+        ) {
+
+            try {
+
+                await gpsTracking.wakeLock.release();
+
+            }
+            catch (error) {
+
+                console.warn(
+                    "Wake Lock release error:",
+                    error
+                );
+            }
+
+            gpsTracking.wakeLock =
+                null;
+        }
+
+        gpsTracking.wakeLockStatus =
+            "Not active";
+
+        updateTrackingStatus();
+    }
+
+    // ======================================================
+    // VISIBILITY CHANGE
+    // ======================================================
+
+    document.addEventListener(
+        "visibilitychange",
+        function () {
+
+            if (
+                document.visibilityState ===
+                "visible" &&
+                gpsTracking.active
+            ) {
+
+                requestWakeLock();
+            }
+
+            updateTrackingStatus();
+        }
+    );
+
+    // ======================================================
     // ADD GPS POSITION
     // ======================================================
 
@@ -541,7 +704,9 @@
         position
     ) {
 
-        if (!gpsTracking.active) {
+        if (
+            !gpsTracking.active
+        ) {
 
             return;
         }
@@ -576,11 +741,7 @@
 
             /*
              * Ignore impossible GPS jumps.
-             *
-             * This prevents a bad GPS fix from
-             * creating a huge artificial distance.
              */
-
             if (
                 distance >= 0 &&
                 distance < 1000
@@ -592,7 +753,7 @@
         }
 
         // --------------------------------------------------
-        // STORE POINT
+        // ADD POINT
         // --------------------------------------------------
 
         gpsTracking.points.push(
@@ -608,13 +769,13 @@
         );
 
         // --------------------------------------------------
-        // DRAW TRACK
+        // UPDATE LINE
         // --------------------------------------------------
 
         updatePath();
 
         // --------------------------------------------------
-        // MOVE MAP
+        // CENTER MAP
         // --------------------------------------------------
 
         map.setView(
@@ -634,20 +795,16 @@
 
         await saveTrack();
 
-        // --------------------------------------------------
-        // STATUS
-        // --------------------------------------------------
-
         gpsTracking.lastGPSStatus =
             "GPS OK";
 
         gpsTracking.lastGPSMessage =
-            "Last point saved locally";
+            "Point saved locally";
 
         updateTrackingStatus();
 
         console.log(
-            "GPS point recorded and saved locally:",
+            "GPS point saved locally:",
             point
         );
     }
@@ -656,9 +813,7 @@
     // GPS ERROR
     // ======================================================
 
-    function handleGPSError(
-        error
-    ) {
+    function handleGPSError(error) {
 
         gpsTracking.lastGPSStatus =
             "GPS Error";
@@ -676,7 +831,7 @@
     }
 
     // ======================================================
-    // REQUEST GPS
+    // REQUEST GPS LOCATION
     // ======================================================
 
     function getGPSLocation() {
@@ -702,9 +857,8 @@
         }
 
         /*
-         * Prevent overlapping GPS requests.
+         * Do not allow overlapping GPS requests.
          */
-
         if (
             gpsTracking.gpsRequestInProgress
         ) {
@@ -782,9 +936,14 @@
             setTimeout(
                 function () {
 
-                    getGPSLocation();
+                    if (
+                        gpsTracking.active
+                    ) {
 
-                    scheduleNextGPS();
+                        getGPSLocation();
+
+                        scheduleNextGPS();
+                    }
 
                 },
                 TRACK_INTERVAL
@@ -822,6 +981,12 @@
         gpsTracking.active =
             true;
 
+        /*
+         * Request Wake Lock immediately after
+         * the user presses the GPS button.
+         */
+        requestWakeLock();
+
         gpsTracking.trackId =
             createTrackId();
 
@@ -837,6 +1002,9 @@
         gpsTracking.totalDistance =
             0;
 
+        gpsTracking.gpsRequestInProgress =
+            false;
+
         gpsTracking.lastGPSStatus =
             "Starting";
 
@@ -844,7 +1012,7 @@
             "";
 
         // --------------------------------------------------
-        // CLEAR MAP
+        // CLEAR OLD MAP
         // --------------------------------------------------
 
         gpsTracking.layer.clearLayers();
@@ -869,7 +1037,7 @@
         }
 
         // --------------------------------------------------
-        // SAVE EMPTY TRACK FIRST
+        // SAVE EMPTY TRACK
         // --------------------------------------------------
 
         await saveTrack();
@@ -881,7 +1049,7 @@
         getGPSLocation();
 
         // --------------------------------------------------
-        // SCHEDULE
+        // NEXT GPS POINTS
         // --------------------------------------------------
 
         scheduleNextGPS();
@@ -927,6 +1095,12 @@
         }
 
         // --------------------------------------------------
+        // RELEASE WAKE LOCK
+        // --------------------------------------------------
+
+        await releaseWakeLock();
+
+        // --------------------------------------------------
         // END TIME
         // --------------------------------------------------
 
@@ -934,7 +1108,7 @@
             new Date().toISOString();
 
         // --------------------------------------------------
-        // FINAL LOCAL SAVE
+        // FINAL SAVE
         // --------------------------------------------------
 
         await saveTrack();
@@ -1107,6 +1281,11 @@
 
             "<br>" +
 
+            "Screen: " +
+            gpsTracking.wakeLockStatus +
+
+            "<br>" +
+
             "Points: " +
             gpsTracking.points.length +
 
@@ -1124,7 +1303,7 @@
     }
 
     // ======================================================
-    // ONLINE / OFFLINE EVENTS
+    // ONLINE / OFFLINE
     // ======================================================
 
     window.addEventListener(
@@ -1307,7 +1486,7 @@
     );
 
     // ======================================================
-    // GEOJSON - POINTS
+    // POINTS GEOJSON
     // ======================================================
 
     function createPointsGeoJSON() {
@@ -1378,7 +1557,7 @@
     }
 
     // ======================================================
-    // GEOJSON - TRACK
+    // TRACK GEOJSON
     // ======================================================
 
     function createTrackGeoJSON() {
@@ -1471,25 +1650,29 @@
                     point.longitude + "," +
 
                     (
-                        point.accuracy !== null
+                        point.accuracy !== null &&
+                        point.accuracy !== undefined
                             ? point.accuracy
                             : ""
                     ) + "," +
 
                     (
-                        point.altitude !== null
+                        point.altitude !== null &&
+                        point.altitude !== undefined
                             ? point.altitude
                             : ""
                     ) + "," +
 
                     (
-                        point.speed !== null
+                        point.speed !== null &&
+                        point.speed !== undefined
                             ? point.speed
                             : ""
                     ) + "," +
 
                     (
-                        point.heading !== null
+                        point.heading !== null &&
+                        point.heading !== undefined
                             ? point.heading
                             : ""
                     ) + "," +
@@ -1543,6 +1726,11 @@
             "GPS points were saved locally using IndexedDB.\n" +
 
             "Internet connection was not required for local storage.\n\n" +
+
+            "SCREEN WAKE LOCK\n" +
+            "----------------\n" +
+
+            "The application requests Screen Wake Lock while tracking is active.\n\n" +
 
             "FILES\n" +
             "-----\n" +
@@ -1734,9 +1922,7 @@
     // CREATE ZIP
     // ======================================================
 
-    function createZIP(
-        files
-    ) {
+    function createZIP(files) {
 
         var localParts = [];
 
@@ -2085,7 +2271,6 @@
 
         var zip =
             createZIP(
-
                 [
 
                     {
@@ -2178,7 +2363,7 @@
     }
 
     // ======================================================
-    // LOAD LAST TRACK
+    // LOAD LAST TRACK FROM INDEXEDDB
     // ======================================================
 
     async function loadLastTrack() {
@@ -2257,7 +2442,7 @@
                 tracks[0];
 
             // ------------------------------------------------
-            // LOAD SAVED DATA
+            // RESTORE DATA
             // ------------------------------------------------
 
             gpsTracking.trackId =
@@ -2276,12 +2461,17 @@
                 latest.totalDistance || 0;
 
             /*
-             * Never automatically start GPS after
+             * Never automatically restart GPS after
              * page reload.
              */
-
             gpsTracking.active =
                 false;
+
+            gpsTracking.wakeLock =
+                null;
+
+            gpsTracking.wakeLockStatus =
+                "Not active";
 
             // ------------------------------------------------
             // REBUILD MAP
@@ -2349,7 +2539,7 @@
     updateTrackingStatus();
 
     console.log(
-        "GPS Tracking System v3 - OFFLINE FIRST loaded."
+        "GPS Tracking System v4 - OFFLINE FIRST + SCREEN WAKE LOCK loaded."
     );
 
 })();
