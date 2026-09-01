@@ -11,7 +11,7 @@
     // SETTINGS
     // ------------------------------------------------------
 
-    var TRACK_INTERVAL = 5 * 60 * 1000; // 5 minutes
+    var TRACK_INTERVAL = 10 * 1000; // 5 minutes
 
     // For testing only, you can temporarily use:
     // var TRACK_INTERVAL = 10 * 1000;
