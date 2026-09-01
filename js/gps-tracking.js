@@ -1,70 +1,100 @@
 // ==========================================================
 // GPS TRACKING FOR QGIS2WEB
-// Version 2 - Local Storage + GeoJSON/CSV/ZIP Export
+// Version 3 - OFFLINE FIRST
+// GPS + IndexedDB + GeoJSON + CSV + ZIP
 // ==========================================================
 
 (function () {
 
     "use strict";
 
-    // ------------------------------------------------------
+    // ======================================================
     // SETTINGS
-    // ------------------------------------------------------
+    // ======================================================
 
-    var TRACK_INTERVAL = 10 * 1000; // 5 minutes
+    // CURRENT TEST INTERVAL = 10 seconds
+    var TRACK_INTERVAL = 10 * 1000;
 
-    // For testing only, you can temporarily use:
-    // var TRACK_INTERVAL = 10 * 1000;
+    // FOR FINAL FIELD USE, change to:
+    // var TRACK_INTERVAL = 5 * 60 * 1000;
 
     var DB_NAME = "QGIS2WebGPSTracks";
-    var DB_VERSION = 1;
+    var DB_VERSION = 2;
     var STORE_NAME = "tracks";
 
-    // ------------------------------------------------------
+    // ======================================================
     // TRACK STATE
-    // ------------------------------------------------------
+    // ======================================================
 
     var gpsTracking = {
+
         active: false,
+
         timer: null,
+
+        gpsRequestInProgress: false,
+
         layer: null,
+
         path: null,
+
         button: null,
+
         downloadButton: null,
 
+        statusPanel: null,
+
         trackId: null,
+
         startTime: null,
+
         endTime: null,
 
         points: [],
 
-        totalDistance: 0
+        totalDistance: 0,
+
+        lastSavePromise: Promise.resolve(),
+
+        lastGPSStatus: "Waiting",
+
+        lastGPSMessage: ""
+
     };
 
-    // ------------------------------------------------------
+    // ======================================================
     // CHECK MAP
-    // ------------------------------------------------------
+    // ======================================================
 
     if (typeof map === "undefined") {
-        console.error("QGIS2Web map was not found.");
+
+        console.error(
+            "QGIS2Web map was not found."
+        );
+
         return;
     }
 
-    // ------------------------------------------------------
+    // ======================================================
     // CREATE GPS LAYER
-    // ------------------------------------------------------
+    // ======================================================
 
-    gpsTracking.layer = L.featureGroup().addTo(map);
+    gpsTracking.layer =
+        L.featureGroup().addTo(map);
 
-    // ------------------------------------------------------
+    // ======================================================
     // CREATE TRACK LINE
-    // ------------------------------------------------------
+    // ======================================================
 
-    gpsTracking.path = L.polyline([], {
-        color: "#006400",
-        weight: 4,
-        opacity: 0.85
-    }).addTo(map);
+    gpsTracking.path =
+        L.polyline(
+            [],
+            {
+                color: "#006400",
+                weight: 4,
+                opacity: 0.85
+            }
+        ).addTo(map);
 
     // ======================================================
     // INDEXEDDB
@@ -72,120 +102,211 @@
 
     function openDatabase() {
 
-        return new Promise(function (resolve, reject) {
+        return new Promise(
+            function (resolve, reject) {
 
-            var request = indexedDB.open(DB_NAME, DB_VERSION);
+                var request =
+                    indexedDB.open(
+                        DB_NAME,
+                        DB_VERSION
+                    );
 
-            request.onupgradeneeded = function (event) {
+                request.onupgradeneeded =
+                    function (event) {
 
-                var db = event.target.result;
+                        var db =
+                            event.target.result;
 
-                if (!db.objectStoreNames.contains(STORE_NAME)) {
+                        if (
+                            !db.objectStoreNames.contains(
+                                STORE_NAME
+                            )
+                        ) {
 
-                    db.createObjectStore(STORE_NAME, {
-                        keyPath: "id"
-                    });
+                            db.createObjectStore(
+                                STORE_NAME,
+                                {
+                                    keyPath: "id"
+                                }
+                            );
+                        }
+                    };
 
-                }
-            };
+                request.onsuccess =
+                    function () {
 
-            request.onsuccess = function () {
-                resolve(request.result);
-            };
+                        resolve(
+                            request.result
+                        );
+                    };
 
-            request.onerror = function () {
-                reject(request.error);
-            };
+                request.onerror =
+                    function () {
 
-        });
-
+                        reject(
+                            request.error
+                        );
+                    };
+            }
+        );
     }
 
-    // ------------------------------------------------------
-    // SAVE TRACK
-    // ------------------------------------------------------
+    // ======================================================
+    // SAVE TRACK LOCALLY
+    // ======================================================
 
-    async function saveTrack() {
+    function saveTrack() {
 
         if (!gpsTracking.trackId) {
-            return;
+
+            return Promise.resolve();
         }
 
-        try {
+        /*
+         * Queue saves so two IndexedDB writes
+         * cannot overwrite each other.
+         */
 
-            var db = await openDatabase();
+        gpsTracking.lastSavePromise =
+            gpsTracking.lastSavePromise.then(
+                function () {
 
-            var track = {
-                id: gpsTracking.trackId,
-                startTime: gpsTracking.startTime,
-                endTime: gpsTracking.endTime,
-                points: gpsTracking.points,
-                totalDistance: gpsTracking.totalDistance,
-                updatedAt: new Date().toISOString()
-            };
+                    return new Promise(
+                        async function (
+                            resolve,
+                            reject
+                        ) {
 
-            return new Promise(function (resolve, reject) {
+                            try {
 
-                var transaction =
-                    db.transaction([STORE_NAME], "readwrite");
+                                var db =
+                                    await openDatabase();
 
-                var store =
-                    transaction.objectStore(STORE_NAME);
+                                var track = {
 
-                store.put(track);
+                                    id:
+                                        gpsTracking.trackId,
 
-                transaction.oncomplete = function () {
-                    db.close();
-                    resolve();
-                };
+                                    startTime:
+                                        gpsTracking.startTime,
 
-                transaction.onerror = function () {
-                    db.close();
-                    reject(transaction.error);
-                };
+                                    endTime:
+                                        gpsTracking.endTime,
 
-            });
+                                    points:
+                                        gpsTracking.points.slice(),
 
-        } catch (error) {
+                                    totalDistance:
+                                        gpsTracking.totalDistance,
 
-            console.error("Could not save GPS track:", error);
+                                    active:
+                                        gpsTracking.active,
 
-        }
+                                    updatedAt:
+                                        new Date().toISOString()
+                                };
 
+                                var transaction =
+                                    db.transaction(
+                                        [STORE_NAME],
+                                        "readwrite"
+                                    );
+
+                                var store =
+                                    transaction.objectStore(
+                                        STORE_NAME
+                                    );
+
+                                store.put(track);
+
+                                transaction.oncomplete =
+                                    function () {
+
+                                        db.close();
+
+                                        resolve();
+                                    };
+
+                                transaction.onerror =
+                                    function () {
+
+                                        db.close();
+
+                                        reject(
+                                            transaction.error
+                                        );
+                                    };
+
+                            }
+                            catch (error) {
+
+                                console.error(
+                                    "IndexedDB save error:",
+                                    error
+                                );
+
+                                reject(error);
+                            }
+                        }
+                    );
+                }
+            ).catch(
+                function (error) {
+
+                    console.error(
+                        "GPS local save failed:",
+                        error
+                    );
+                }
+            );
+
+        return gpsTracking.lastSavePromise;
     }
 
     // ======================================================
-    // DISTANCE CALCULATION
+    // DISTANCE
     // ======================================================
 
-    function calculateDistance(lat1, lon1, lat2, lon2) {
+    function calculateDistance(
+        lat1,
+        lon1,
+        lat2,
+        lon2
+    ) {
 
         var R = 6371000;
 
         var dLat =
-            (lat2 - lat1) * Math.PI / 180;
+            (lat2 - lat1) *
+            Math.PI / 180;
 
         var dLon =
-            (lon2 - lon1) * Math.PI / 180;
+            (lon2 - lon1) *
+            Math.PI / 180;
 
         var a =
             Math.sin(dLat / 2) *
             Math.sin(dLat / 2) +
 
-            Math.cos(lat1 * Math.PI / 180) *
-            Math.cos(lat2 * Math.PI / 180) *
+            Math.cos(
+                lat1 * Math.PI / 180
+            ) *
+
+            Math.cos(
+                lat2 * Math.PI / 180
+            ) *
 
             Math.sin(dLon / 2) *
             Math.sin(dLon / 2);
 
         var c =
-            2 * Math.atan2(
+            2 *
+            Math.atan2(
                 Math.sqrt(a),
                 Math.sqrt(1 - a)
             );
 
         return R * c;
-
     }
 
     // ======================================================
@@ -196,29 +317,43 @@
 
         if (meters < 1000) {
 
-            return meters.toFixed(0) + " m";
-
+            return (
+                meters.toFixed(0) +
+                " m"
+            );
         }
 
-        return (meters / 1000).toFixed(2) + " km";
-
+        return (
+            (meters / 1000).toFixed(2) +
+            " km"
+        );
     }
 
     // ======================================================
     // FORMAT DURATION
     // ======================================================
 
-    function formatDuration(milliseconds) {
+    function formatDuration(
+        milliseconds
+    ) {
 
-        if (!milliseconds || milliseconds < 0) {
+        if (
+            !milliseconds ||
+            milliseconds < 0
+        ) {
+
             return "00:00:00";
         }
 
         var totalSeconds =
-            Math.floor(milliseconds / 1000);
+            Math.floor(
+                milliseconds / 1000
+            );
 
         var hours =
-            Math.floor(totalSeconds / 3600);
+            Math.floor(
+                totalSeconds / 3600
+            );
 
         var minutes =
             Math.floor(
@@ -235,7 +370,6 @@
             ":" +
             String(seconds).padStart(2, "0")
         );
-
     }
 
     // ======================================================
@@ -248,17 +382,24 @@
 
         var date =
             now.toISOString()
-                .replace(/[:.]/g, "-");
+                .replace(
+                    /[:.]/g,
+                    "-"
+                );
 
-        return "GPS_Track_" + date;
-
+        return (
+            "GPS_Track_" +
+            date
+        );
     }
 
     // ======================================================
     // CREATE GPS POINT
     // ======================================================
 
-    function createGPSPoint(position) {
+    function createGPSPoint(
+        position
+    ) {
 
         var latitude =
             position.coords.latitude;
@@ -270,31 +411,49 @@
             position.coords.accuracy;
 
         var timestamp =
-            new Date().toISOString();
+            new Date(
+                position.timestamp ||
+                Date.now()
+            ).toISOString();
 
-        var point = {
+        return {
 
-            id: gpsTracking.points.length + 1,
+            id:
+                gpsTracking.points.length + 1,
 
-            latitude: latitude,
+            latitude:
+                latitude,
 
-            longitude: longitude,
+            longitude:
+                longitude,
 
-            accuracy: accuracy,
+            accuracy:
+                accuracy,
 
-            timestamp: timestamp
+            altitude:
+                position.coords.altitude,
 
+            altitudeAccuracy:
+                position.coords.altitudeAccuracy,
+
+            speed:
+                position.coords.speed,
+
+            heading:
+                position.coords.heading,
+
+            timestamp:
+                timestamp
         };
-
-        return point;
-
     }
 
     // ======================================================
     // ADD POINT TO MAP
     // ======================================================
 
-    function addPointToMap(point) {
+    function addPointToMap(
+        point
+    ) {
 
         var marker =
             L.circleMarker(
@@ -304,9 +463,13 @@
                 ],
                 {
                     radius: 7,
+
                     color: "#006400",
+
                     fillColor: "#00ff00",
+
                     fillOpacity: 0.8,
+
                     weight: 2
                 }
             );
@@ -319,67 +482,82 @@
 
             "Latitude: " +
             point.latitude.toFixed(6) +
+
             "<br>" +
 
             "Longitude: " +
             point.longitude.toFixed(6) +
+
             "<br>" +
 
             "Accuracy: " +
-            point.accuracy.toFixed(1) +
+            (
+                point.accuracy !== null
+                    ? point.accuracy.toFixed(1)
+                    : "N/A"
+            ) +
+
             " m<br>" +
 
             "Time: " +
+
             new Date(
                 point.timestamp
             ).toLocaleString()
-
         );
 
-        gpsTracking.layer.addLayer(marker);
-
+        gpsTracking.layer.addLayer(
+            marker
+        );
     }
 
     // ======================================================
-    // UPDATE LINE
+    // UPDATE TRACK LINE
     // ======================================================
 
     function updatePath() {
 
         var coordinates =
-            gpsTracking.points.map(function (point) {
+            gpsTracking.points.map(
+                function (point) {
 
-                return [
-                    point.latitude,
-                    point.longitude
-                ];
-
-            });
+                    return [
+                        point.latitude,
+                        point.longitude
+                    ];
+                }
+            );
 
         gpsTracking.path.setLatLngs(
             coordinates
         );
-
     }
 
     // ======================================================
-    // ADD NEW GPS POSITION
+    // ADD GPS POSITION
     // ======================================================
 
-    function addGPSPosition(position) {
+    async function addGPSPosition(
+        position
+    ) {
 
         if (!gpsTracking.active) {
+
             return;
         }
 
         var point =
-            createGPSPoint(position);
+            createGPSPoint(
+                position
+            );
 
-        // ----------------------------------------------
-        // Calculate distance
-        // ----------------------------------------------
+        // --------------------------------------------------
+        // DISTANCE
+        // --------------------------------------------------
 
-        if (gpsTracking.points.length > 0) {
+        if (
+            gpsTracking.points.length > 0
+        ) {
 
             var previous =
                 gpsTracking.points[
@@ -394,35 +572,50 @@
 
                     point.latitude,
                     point.longitude
-
                 );
 
-            gpsTracking.totalDistance +=
-                distance;
+            /*
+             * Ignore impossible GPS jumps.
+             *
+             * This prevents a bad GPS fix from
+             * creating a huge artificial distance.
+             */
 
+            if (
+                distance >= 0 &&
+                distance < 1000
+            ) {
+
+                gpsTracking.totalDistance +=
+                    distance;
+            }
         }
 
-        // ----------------------------------------------
-        // Store point
-        // ----------------------------------------------
+        // --------------------------------------------------
+        // STORE POINT
+        // --------------------------------------------------
 
-        gpsTracking.points.push(point);
+        gpsTracking.points.push(
+            point
+        );
 
-        // ----------------------------------------------
-        // Draw point
-        // ----------------------------------------------
+        // --------------------------------------------------
+        // DRAW POINT
+        // --------------------------------------------------
 
-        addPointToMap(point);
+        addPointToMap(
+            point
+        );
 
-        // ----------------------------------------------
-        // Draw line
-        // ----------------------------------------------
+        // --------------------------------------------------
+        // DRAW TRACK
+        // --------------------------------------------------
 
         updatePath();
 
-        // ----------------------------------------------
-        // Move map
-        // ----------------------------------------------
+        // --------------------------------------------------
+        // MOVE MAP
+        // --------------------------------------------------
 
         map.setView(
             [
@@ -435,36 +628,69 @@
             )
         );
 
-        // ----------------------------------------------
-        // Save immediately
-        // ----------------------------------------------
+        // --------------------------------------------------
+        // SAVE IMMEDIATELY
+        // --------------------------------------------------
 
-        saveTrack();
+        await saveTrack();
 
-        // ----------------------------------------------
-        // Update control
-        // ----------------------------------------------
+        // --------------------------------------------------
+        // STATUS
+        // --------------------------------------------------
+
+        gpsTracking.lastGPSStatus =
+            "GPS OK";
+
+        gpsTracking.lastGPSMessage =
+            "Last point saved locally";
 
         updateTrackingStatus();
 
         console.log(
-            "GPS point recorded:",
+            "GPS point recorded and saved locally:",
             point
         );
-
     }
 
     // ======================================================
-    // GET GPS POSITION
+    // GPS ERROR
+    // ======================================================
+
+    function handleGPSError(
+        error
+    ) {
+
+        gpsTracking.lastGPSStatus =
+            "GPS Error";
+
+        gpsTracking.lastGPSMessage =
+            error.message ||
+            "Unable to obtain GPS position";
+
+        updateTrackingStatus();
+
+        console.error(
+            "GPS error:",
+            error
+        );
+    }
+
+    // ======================================================
+    // REQUEST GPS
     // ======================================================
 
     function getGPSLocation() {
 
-        if (!gpsTracking.active) {
+        if (
+            !gpsTracking.active
+        ) {
+
             return;
         }
 
-        if (!navigator.geolocation) {
+        if (
+            !navigator.geolocation
+        ) {
 
             alert(
                 "GPS / Geolocation is not supported by this browser."
@@ -475,67 +701,126 @@
             return;
         }
 
+        /*
+         * Prevent overlapping GPS requests.
+         */
+
+        if (
+            gpsTracking.gpsRequestInProgress
+        ) {
+
+            return;
+        }
+
+        gpsTracking.gpsRequestInProgress =
+            true;
+
+        gpsTracking.lastGPSStatus =
+            "Getting GPS...";
+
+        updateTrackingStatus();
+
         navigator.geolocation.getCurrentPosition(
 
             function (position) {
 
-                addGPSPosition(position);
+                gpsTracking.gpsRequestInProgress =
+                    false;
 
+                addGPSPosition(
+                    position
+                );
             },
 
             function (error) {
 
-                console.error(
-                    "GPS error:",
+                gpsTracking.gpsRequestInProgress =
+                    false;
+
+                handleGPSError(
                     error
                 );
-
-                alert(
-                    "Unable to obtain GPS location: " +
-                    error.message
-                );
-
             },
 
             {
-                enableHighAccuracy: true,
-                timeout: 30000,
-                maximumAge: 0
+
+                enableHighAccuracy:
+                    true,
+
+                timeout:
+                    30000,
+
+                maximumAge:
+                    0
             }
-
         );
+    }
 
+    // ======================================================
+    // SCHEDULE NEXT GPS READING
+    // ======================================================
+
+    function scheduleNextGPS() {
+
+        if (
+            !gpsTracking.active
+        ) {
+
+            return;
+        }
+
+        if (
+            gpsTracking.timer
+        ) {
+
+            clearTimeout(
+                gpsTracking.timer
+            );
+        }
+
+        gpsTracking.timer =
+            setTimeout(
+                function () {
+
+                    getGPSLocation();
+
+                    scheduleNextGPS();
+
+                },
+                TRACK_INTERVAL
+            );
     }
 
     // ======================================================
     // START TRACKING
     // ======================================================
 
-    function startGPSTracking() {
+    async function startGPSTracking() {
 
-        if (!navigator.geolocation) {
+        if (
+            !navigator.geolocation
+        ) {
 
             alert(
                 "GPS / Geolocation is not supported by this browser."
             );
 
             return;
-
         }
 
-        // --------------------------------------------------
-        // Prevent double start
-        // --------------------------------------------------
+        if (
+            gpsTracking.active
+        ) {
 
-        if (gpsTracking.active) {
             return;
         }
 
         // --------------------------------------------------
-        // New track
+        // NEW TRACK
         // --------------------------------------------------
 
-        gpsTracking.active = true;
+        gpsTracking.active =
+            true;
 
         gpsTracking.trackId =
             createTrackId();
@@ -543,58 +828,63 @@
         gpsTracking.startTime =
             new Date().toISOString();
 
-        gpsTracking.endTime = null;
+        gpsTracking.endTime =
+            null;
 
-        gpsTracking.points = [];
+        gpsTracking.points =
+            [];
 
-        gpsTracking.totalDistance = 0;
+        gpsTracking.totalDistance =
+            0;
+
+        gpsTracking.lastGPSStatus =
+            "Starting";
+
+        gpsTracking.lastGPSMessage =
+            "";
 
         // --------------------------------------------------
-        // Clear previous map
+        // CLEAR MAP
         // --------------------------------------------------
 
         gpsTracking.layer.clearLayers();
 
-        gpsTracking.path.setLatLngs([]);
+        gpsTracking.path.setLatLngs(
+            []
+        );
 
         // --------------------------------------------------
-        // Change button
+        // BUTTON
         // --------------------------------------------------
 
-        if (gpsTracking.button) {
+        if (
+            gpsTracking.button
+        ) {
 
             gpsTracking.button.innerHTML =
                 "⏹️";
 
             gpsTracking.button.title =
                 "Stop GPS Tracking";
-
         }
 
         // --------------------------------------------------
-        // First GPS point immediately
+        // SAVE EMPTY TRACK FIRST
+        // --------------------------------------------------
+
+        await saveTrack();
+
+        // --------------------------------------------------
+        // FIRST GPS POINT
         // --------------------------------------------------
 
         getGPSLocation();
 
         // --------------------------------------------------
-        // Every 5 minutes
+        // SCHEDULE
         // --------------------------------------------------
 
-        gpsTracking.timer =
-            setInterval(
-
-                function () {
-
-                    getGPSLocation();
-
-                },
-
-                TRACK_INTERVAL
-
-            );
-
-        saveTrack();
+        scheduleNextGPS();
 
         updateTrackingStatus();
 
@@ -602,7 +892,6 @@
             "GPS tracking started:",
             gpsTracking.trackId
         );
-
     }
 
     // ======================================================
@@ -611,52 +900,65 @@
 
     async function stopGPSTracking() {
 
-        if (!gpsTracking.active) {
+        if (
+            !gpsTracking.active
+        ) {
+
             return;
         }
 
-        gpsTracking.active = false;
+        gpsTracking.active =
+            false;
 
         // --------------------------------------------------
-        // Stop timer
+        // STOP TIMER
         // --------------------------------------------------
 
-        if (gpsTracking.timer) {
+        if (
+            gpsTracking.timer
+        ) {
 
-            clearInterval(
+            clearTimeout(
                 gpsTracking.timer
             );
 
-            gpsTracking.timer = null;
-
+            gpsTracking.timer =
+                null;
         }
 
         // --------------------------------------------------
-        // End time
+        // END TIME
         // --------------------------------------------------
 
         gpsTracking.endTime =
             new Date().toISOString();
 
         // --------------------------------------------------
-        // Save final track
+        // FINAL LOCAL SAVE
         // --------------------------------------------------
 
         await saveTrack();
 
         // --------------------------------------------------
-        // Change button
+        // BUTTON
         // --------------------------------------------------
 
-        if (gpsTracking.button) {
+        if (
+            gpsTracking.button
+        ) {
 
             gpsTracking.button.innerHTML =
                 "📍";
 
             gpsTracking.button.title =
                 "Start GPS Tracking";
-
         }
+
+        gpsTracking.lastGPSStatus =
+            "Stopped";
+
+        gpsTracking.lastGPSMessage =
+            "Track saved locally";
 
         updateTrackingStatus();
 
@@ -665,78 +967,79 @@
         );
 
         alert(
+
             "Tracking stopped.\n\n" +
 
             "Points: " +
             gpsTracking.points.length +
 
             "\nDistance: " +
+
             formatDistance(
                 gpsTracking.totalDistance
             )
         );
-
     }
 
     // ======================================================
     // STATUS PANEL
     // ======================================================
 
-    var statusControl =
+    var StatusControl =
         L.Control.extend({
 
             options: {
-                position: "topright"
+                position:
+                    "topright"
             },
 
-            onAdd: function () {
+            onAdd:
+                function () {
 
-                var container =
-                    L.DomUtil.create(
-                        "div",
-                        "gps-status-panel"
+                    var container =
+                        L.DomUtil.create(
+                            "div",
+                            "gps-status-panel"
+                        );
+
+                    container.style.background =
+                        "rgba(255,255,255,0.95)";
+
+                    container.style.padding =
+                        "8px 10px";
+
+                    container.style.borderRadius =
+                        "6px";
+
+                    container.style.fontSize =
+                        "13px";
+
+                    container.style.lineHeight =
+                        "1.4";
+
+                    container.style.minWidth =
+                        "190px";
+
+                    container.style.boxShadow =
+                        "0 1px 5px rgba(0,0,0,0.3)";
+
+                    container.innerHTML =
+                        "<b>GPS Tracking</b><br>" +
+                        "Status: Ready";
+
+                    gpsTracking.statusPanel =
+                        container;
+
+                    L.DomEvent.disableClickPropagation(
+                        container
                     );
 
-                container.style.background =
-                    "rgba(255,255,255,0.95)";
-
-                container.style.padding =
-                    "8px 10px";
-
-                container.style.borderRadius =
-                    "6px";
-
-                container.style.fontSize =
-                    "13px";
-
-                container.style.lineHeight =
-                    "1.4";
-
-                container.style.minWidth =
-                    "160px";
-
-                container.style.boxShadow =
-                    "0 1px 5px rgba(0,0,0,0.3)";
-
-                container.innerHTML =
-                    "<b>GPS Tracking</b><br>" +
-                    "Status: Ready";
-
-                gpsTracking.statusPanel =
-                    container;
-
-                L.DomEvent.disableClickPropagation(
-                    container
-                );
-
-                return container;
-
-            }
-
+                    return container;
+                }
         });
 
     map.addControl(
-        new statusControl()
+        new StatusControl()
     );
 
     // ======================================================
@@ -745,31 +1048,44 @@
 
     function updateTrackingStatus() {
 
-        if (!gpsTracking.statusPanel) {
+        if (
+            !gpsTracking.statusPanel
+        ) {
+
             return;
         }
 
-        var status =
+        var trackingStatus =
             gpsTracking.active
                 ? "🟢 Recording"
                 : "⚪ Stopped";
 
+        var internetStatus =
+            navigator.onLine
+                ? "🟢 Online"
+                : "🔴 Offline";
+
         var duration =
             gpsTracking.startTime
+
                 ? formatDuration(
 
                     (
                         gpsTracking.endTime
+
                             ? new Date(
                                 gpsTracking.endTime
                             )
+
                             : new Date()
+
                     ) -
+
                     new Date(
                         gpsTracking.startTime
                     )
-
                 )
+
                 : "00:00:00";
 
         gpsTracking.statusPanel.innerHTML =
@@ -777,23 +1093,63 @@
             "<b>GPS Tracking</b><br>" +
 
             "Status: " +
-            status +
+            trackingStatus +
+
+            "<br>" +
+
+            "Internet: " +
+            internetStatus +
+
+            "<br>" +
+
+            "GPS: " +
+            gpsTracking.lastGPSStatus +
+
             "<br>" +
 
             "Points: " +
             gpsTracking.points.length +
+
             "<br>" +
 
             "Distance: " +
             formatDistance(
                 gpsTracking.totalDistance
             ) +
+
             "<br>" +
 
             "Duration: " +
             duration;
-
     }
+
+    // ======================================================
+    // ONLINE / OFFLINE EVENTS
+    // ======================================================
+
+    window.addEventListener(
+        "online",
+        function () {
+
+            console.log(
+                "Internet connection restored."
+            );
+
+            updateTrackingStatus();
+        }
+    );
+
+    window.addEventListener(
+        "offline",
+        function () {
+
+            console.warn(
+                "Internet connection lost. GPS tracking continues locally."
+            );
+
+            updateTrackingStatus();
+        }
+    );
 
     // ======================================================
     // GPS CONTROL
@@ -803,74 +1159,76 @@
         L.Control.extend({
 
             options: {
-                position: "topleft"
+                position:
+                    "topleft"
             },
 
-            onAdd: function () {
+            onAdd:
+                function () {
 
-                var container =
-                    L.DomUtil.create(
-                        "div",
-                        "leaflet-bar leaflet-control"
-                    );
+                    var container =
+                        L.DomUtil.create(
+                            "div",
+                            "leaflet-bar leaflet-control"
+                        );
 
-                var button =
-                    L.DomUtil.create(
-                        "a",
-                        "",
+                    var button =
+                        L.DomUtil.create(
+                            "a",
+                            "",
+                            container
+                        );
+
+                    button.href =
+                        "#";
+
+                    button.innerHTML =
+                        "📍";
+
+                    button.title =
+                        "Start GPS Tracking";
+
+                    button.style.fontSize =
+                        "18px";
+
+                    button.style.textAlign =
+                        "center";
+
+                    button.style.textDecoration =
+                        "none";
+
+                    L.DomEvent.disableClickPropagation(
                         container
                     );
 
-                button.href = "#";
+                    L.DomEvent.on(
+                        button,
+                        "click",
+                        function (event) {
 
-                button.innerHTML =
-                    "📍";
+                            L.DomEvent.stop(
+                                event
+                            );
 
-                button.title =
-                    "Start GPS Tracking";
+                            if (
+                                gpsTracking.active
+                            ) {
 
-                button.style.fontSize =
-                    "18px";
+                                stopGPSTracking();
 
-                button.style.textAlign =
-                    "center";
+                            }
+                            else {
 
-                button.style.textDecoration =
-                    "none";
-
-                L.DomEvent.disableClickPropagation(
-                    container
-                );
-
-                L.DomEvent.on(
-                    button,
-                    "click",
-                    function (event) {
-
-                        L.DomEvent.stop(event);
-
-                        if (
-                            gpsTracking.active
-                        ) {
-
-                            stopGPSTracking();
-
-                        } else {
-
-                            startGPSTracking();
-
+                                startGPSTracking();
+                            }
                         }
+                    );
 
-                    }
-                );
+                    gpsTracking.button =
+                        button;
 
-                gpsTracking.button =
-                    button;
-
-                return container;
-
-            }
-
+                    return container;
+                }
         });
 
     map.addControl(
@@ -885,61 +1243,63 @@
         L.Control.extend({
 
             options: {
-                position: "topleft"
+                position:
+                    "topleft"
             },
 
-            onAdd: function () {
+            onAdd:
+                function () {
 
-                var container =
-                    L.DomUtil.create(
-                        "div",
-                        "leaflet-bar leaflet-control"
-                    );
+                    var container =
+                        L.DomUtil.create(
+                            "div",
+                            "leaflet-bar leaflet-control"
+                        );
 
-                var button =
-                    L.DomUtil.create(
-                        "a",
-                        "",
+                    var button =
+                        L.DomUtil.create(
+                            "a",
+                            "",
+                            container
+                        );
+
+                    button.href =
+                        "#";
+
+                    button.innerHTML =
+                        "💾";
+
+                    button.title =
+                        "Download GPS Track";
+
+                    button.style.fontSize =
+                        "18px";
+
+                    button.style.textAlign =
+                        "center";
+
+                    L.DomEvent.disableClickPropagation(
                         container
                     );
 
-                button.href = "#";
+                    L.DomEvent.on(
+                        button,
+                        "click",
+                        function (event) {
 
-                button.innerHTML =
-                    "💾";
+                            L.DomEvent.stop(
+                                event
+                            );
 
-                button.title =
-                    "Download GPS Track";
+                            downloadCurrentTrack();
+                        }
+                    );
 
-                button.style.fontSize =
-                    "18px";
+                    gpsTracking.downloadButton =
+                        button;
 
-                button.style.textAlign =
-                    "center";
-
-                L.DomEvent.disableClickPropagation(
-                    container
-                );
-
-                L.DomEvent.on(
-                    button,
-                    "click",
-                    function (event) {
-
-                        L.DomEvent.stop(event);
-
-                        downloadCurrentTrack();
-
-                    }
-                );
-
-                gpsTracking.downloadButton =
-                    button;
-
-                return container;
-
-            }
-
+                    return container;
+                }
         });
 
     map.addControl(
@@ -954,16 +1314,17 @@
 
         var features =
             gpsTracking.points.map(
-
                 function (point) {
 
                     return {
 
-                        type: "Feature",
+                        type:
+                            "Feature",
 
                         properties: {
 
-                            id: point.id,
+                            id:
+                                point.id,
 
                             latitude:
                                 point.latitude,
@@ -974,39 +1335,46 @@
                             accuracy:
                                 point.accuracy,
 
+                            altitude:
+                                point.altitude,
+
+                            altitude_accuracy:
+                                point.altitudeAccuracy,
+
+                            speed:
+                                point.speed,
+
+                            heading:
+                                point.heading,
+
                             timestamp:
                                 point.timestamp
-
                         },
 
                         geometry: {
 
-                            type: "Point",
+                            type:
+                                "Point",
 
                             coordinates: [
 
                                 point.longitude,
 
                                 point.latitude
-
                             ]
-
                         }
-
                     };
-
                 }
-
             );
 
         return {
 
-            type: "FeatureCollection",
+            type:
+                "FeatureCollection",
 
-            features: features
-
+            features:
+                features
         };
-
     }
 
     // ======================================================
@@ -1017,7 +1385,6 @@
 
         var coordinates =
             gpsTracking.points.map(
-
                 function (point) {
 
                     return [
@@ -1025,36 +1392,38 @@
                         point.longitude,
 
                         point.latitude
-
                     ];
-
                 }
-
             );
 
-        var geometry = null;
+        var geometry =
+            null;
 
-        if (coordinates.length >= 2) {
+        if (
+            coordinates.length >= 2
+        ) {
 
             geometry = {
 
-                type: "LineString",
+                type:
+                    "LineString",
 
-                coordinates: coordinates
-
+                coordinates:
+                    coordinates
             };
-
         }
 
         return {
 
-            type: "FeatureCollection",
+            type:
+                "FeatureCollection",
 
             features: [
 
                 {
 
-                    type: "Feature",
+                    type:
+                        "Feature",
 
                     properties: {
 
@@ -1072,17 +1441,13 @@
 
                         distance_m:
                             gpsTracking.totalDistance
-
                     },
 
-                    geometry: geometry
-
+                    geometry:
+                        geometry
                 }
-
             ]
-
         };
-
     }
 
     // ======================================================
@@ -1092,10 +1457,9 @@
     function createCSV() {
 
         var csv =
-            "id,latitude,longitude,accuracy_m,timestamp\n";
+            "id,latitude,longitude,accuracy_m,altitude_m,speed_mps,heading_deg,timestamp\n";
 
         gpsTracking.points.forEach(
-
             function (point) {
 
                 csv +=
@@ -1106,18 +1470,37 @@
 
                     point.longitude + "," +
 
-                    point.accuracy + "," +
+                    (
+                        point.accuracy !== null
+                            ? point.accuracy
+                            : ""
+                    ) + "," +
+
+                    (
+                        point.altitude !== null
+                            ? point.altitude
+                            : ""
+                    ) + "," +
+
+                    (
+                        point.speed !== null
+                            ? point.speed
+                            : ""
+                    ) + "," +
+
+                    (
+                        point.heading !== null
+                            ? point.heading
+                            : ""
+                    ) + "," +
 
                     point.timestamp +
 
                     "\n";
-
             }
-
         );
 
         return csv;
-
     }
 
     // ======================================================
@@ -1154,27 +1537,32 @@
             gpsTracking.totalDistance.toFixed(2) +
             " meters\n\n" +
 
+            "TRACKING MODE\n" +
+            "-------------\n" +
+
+            "GPS points were saved locally using IndexedDB.\n" +
+
+            "Internet connection was not required for local storage.\n\n" +
+
             "FILES\n" +
             "-----\n" +
 
             "track.geojson\n" +
-            "Contains the GPS track as a LineString.\n\n" +
+            "GPS track as LineString.\n\n" +
 
             "points.geojson\n" +
-            "Contains every GPS location as a Point.\n\n" +
+            "Every GPS location as a Point.\n\n" +
 
             "points.csv\n" +
-            "Contains latitude, longitude, accuracy and timestamp.\n\n" +
+            "GPS coordinates and attributes.\n\n" +
 
             "QGIS\n" +
             "----\n" +
 
             "Open track.geojson and points.geojson in QGIS.\n" +
 
-            "GeoJSON coordinates use WGS84 / EPSG:4326.\n"
-
+            "Coordinate system: WGS84 / EPSG:4326.\n"
         );
-
     }
 
     // ======================================================
@@ -1183,8 +1571,9 @@
 
     function textToBytes(text) {
 
-        return new TextEncoder().encode(text);
-
+        return new TextEncoder().encode(
+            text
+        );
     }
 
     // ======================================================
@@ -1197,28 +1586,36 @@
 
         var table = [];
 
-        for (var n = 0; n < 256; n++) {
+        for (
+            var n = 0;
+            n < 256;
+            n++
+        ) {
 
             var c = n;
 
-            for (var k = 0; k < 8; k++) {
+            for (
+                var k = 0;
+                k < 8;
+                k++
+            ) {
 
                 c =
                     (
                         c & 1
                     )
+
                         ? 0xEDB88320 ^
                           (c >>> 1)
-                        : c >>> 1;
 
+                        : c >>> 1;
             }
 
-            table[n] = c >>> 0;
-
+            table[n] =
+                c >>> 0;
         }
 
         return table;
-
     }
 
     function crc32(bytes) {
@@ -1227,10 +1624,10 @@
 
             crcTable =
                 makeCRCTable();
-
         }
 
-        var crc = 0xFFFFFFFF;
+        var crc =
+            0xFFFFFFFF;
 
         for (
             var i = 0;
@@ -1244,13 +1641,12 @@
                     0xFF
                 ] ^
                 (crc >>> 8);
-
         }
 
         return (
-            crc ^ 0xFFFFFFFF
+            crc ^
+            0xFFFFFFFF
         ) >>> 0;
-
     }
 
     // ======================================================
@@ -1268,7 +1664,6 @@
 
         array[offset + 1] =
             (value >>> 8) & 0xFF;
-
     }
 
     // ======================================================
@@ -1292,25 +1687,30 @@
 
         array[offset + 3] =
             (value >>> 24) & 0xFF;
-
     }
 
     // ======================================================
     // CONCAT ARRAYS
     // ======================================================
 
-    function concatUint8Arrays(arrays) {
+    function concatUint8Arrays(
+        arrays
+    ) {
 
         var total = 0;
 
         arrays.forEach(
             function (array) {
-                total += array.length;
+
+                total +=
+                    array.length;
             }
         );
 
         var result =
-            new Uint8Array(total);
+            new Uint8Array(
+                total
+            );
 
         var offset = 0;
 
@@ -1322,20 +1722,21 @@
                     offset
                 );
 
-                offset += array.length;
-
+                offset +=
+                    array.length;
             }
         );
 
         return result;
-
     }
 
     // ======================================================
     // CREATE ZIP
     // ======================================================
 
-    function createZIP(files) {
+    function createZIP(
+        files
+    ) {
 
         var localParts = [];
 
@@ -1357,14 +1758,18 @@
                     );
 
                 var crc =
-                    crc32(dataBytes);
+                    crc32(
+                        dataBytes
+                    );
 
                 // ------------------------------------------
-                // Local file header
+                // LOCAL HEADER
                 // ------------------------------------------
 
                 var localHeader =
-                    new Uint8Array(30);
+                    new Uint8Array(
+                        30
+                    );
 
                 writeUint32(
                     localHeader,
@@ -1439,11 +1844,13 @@
                 );
 
                 // ------------------------------------------
-                // Central directory
+                // CENTRAL DIRECTORY
                 // ------------------------------------------
 
                 var centralHeader =
-                    new Uint8Array(46);
+                    new Uint8Array(
+                        46
+                    );
 
                 writeUint32(
                     centralHeader,
@@ -1553,10 +1960,12 @@
                 );
 
                 offset +=
-                    localHeader.length +
-                    nameBytes.length +
-                    dataBytes.length;
 
+                    localHeader.length +
+
+                    nameBytes.length +
+
+                    dataBytes.length;
             }
         );
 
@@ -1570,12 +1979,14 @@
                 centralParts
             );
 
-        // --------------------------------------------------
-        // End of central directory
-        // --------------------------------------------------
+        // ----------------------------------------------
+        // END OF CENTRAL DIRECTORY
+        // ----------------------------------------------
 
         var end =
-            new Uint8Array(22);
+            new Uint8Array(
+                22
+            );
 
         writeUint32(
             end,
@@ -1632,7 +2043,6 @@
                 end
             ]
         );
-
     }
 
     // ======================================================
@@ -1651,7 +2061,6 @@
             );
 
             return;
-
         }
 
         var trackGeoJSON =
@@ -1710,9 +2119,7 @@
                         content:
                             readme
                     }
-
                 ]
-
             );
 
         var blob =
@@ -1734,7 +2141,8 @@
                 "a"
             );
 
-        link.href = url;
+        link.href =
+            url;
 
         link.download =
             (
@@ -1767,11 +2175,10 @@
         console.log(
             "GPS track downloaded."
         );
-
     }
 
     // ======================================================
-    // LOAD LAST TRACK FROM INDEXEDDB
+    // LOAD LAST TRACK
     // ======================================================
 
     async function loadLastTrack() {
@@ -1808,7 +2215,6 @@
                                 resolve(
                                     request.result
                                 );
-
                             };
 
                         request.onerror =
@@ -1817,9 +2223,7 @@
                                 reject(
                                     request.error
                                 );
-
                             };
-
                     }
                 );
 
@@ -1831,19 +2235,21 @@
             ) {
 
                 return;
-
             }
 
             tracks.sort(
                 function (a, b) {
 
-                    return new Date(
-                        b.updatedAt
-                    ) -
-                    new Date(
-                        a.updatedAt
-                    );
+                    return (
 
+                        new Date(
+                            b.updatedAt
+                        ) -
+
+                        new Date(
+                            a.updatedAt
+                        )
+                    );
                 }
             );
 
@@ -1851,7 +2257,7 @@
                 tracks[0];
 
             // ------------------------------------------------
-            // Do not automatically resume recording
+            // LOAD SAVED DATA
             // ------------------------------------------------
 
             gpsTracking.trackId =
@@ -1869,13 +2275,23 @@
             gpsTracking.totalDistance =
                 latest.totalDistance || 0;
 
+            /*
+             * Never automatically start GPS after
+             * page reload.
+             */
+
+            gpsTracking.active =
+                false;
+
             // ------------------------------------------------
-            // Rebuild map
+            // REBUILD MAP
             // ------------------------------------------------
 
             gpsTracking.layer.clearLayers();
 
-            gpsTracking.path.setLatLngs([]);
+            gpsTracking.path.setLatLngs(
+                []
+            );
 
             gpsTracking.points.forEach(
                 function (point) {
@@ -1883,11 +2299,16 @@
                     addPointToMap(
                         point
                     );
-
                 }
             );
 
             updatePath();
+
+            gpsTracking.lastGPSStatus =
+                "Saved";
+
+            gpsTracking.lastGPSMessage =
+                "Previous track loaded locally";
 
             updateTrackingStatus();
 
@@ -1896,16 +2317,28 @@
                 latest.id
             );
 
-        } catch (error) {
+        }
+        catch (error) {
 
             console.error(
                 "Could not load saved track:",
                 error
             );
-
         }
-
     }
+
+    // ======================================================
+    // UPDATE STATUS EVERY SECOND
+    // ======================================================
+
+    setInterval(
+        function () {
+
+            updateTrackingStatus();
+
+        },
+        1000
+    );
 
     // ======================================================
     // INITIALIZE
@@ -1916,7 +2349,7 @@
     updateTrackingStatus();
 
     console.log(
-        "GPS Tracking System v2 loaded."
+        "GPS Tracking System v3 - OFFLINE FIRST loaded."
     );
 
 })();
