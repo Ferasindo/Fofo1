@@ -7,7 +7,7 @@ var gpsTracking = {
     timer: null,
     marker: null,
     layer: null,
-    interval: 5 * 60 * 1000 // 5 minutes
+    interval: 10 * 1000 // 5 minutes
 };
 
 // Create a layer for GPS points
